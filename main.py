@@ -7,6 +7,10 @@ import feedparser
 from bs4 import BeautifulSoup
 import os
 from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
 
 load_dotenv()
@@ -18,11 +22,12 @@ RSS_URL = 'https://ria.ru/export/rss2/archive/index.xml'
 IMG_DIR = Path(__file__).resolve().parent / 'images'
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0'}
 
+# Вкладки: ключ -> (название, ссылка, файл картинки)
 TABS = {
-    'main': ('Главное', RSS_URL, ' '),
-    'politics': ('Политика', 'https://ria.ru/politics/', ' '),
-    'world': ('В мире', 'https://ria.ru/world/', ' '),
-    'economy': ('Экономика', 'https://ria.ru/economy/', ' '),
+    'main': ('Главное', RSS_URL, 'main.png'),
+    'politics': ('Политика', 'https://ria.ru/politics/', 'wide.jpg'),
+    'world': ('В мире', 'https://ria.ru/world/', 'geopolitics.png'),
+    'economy': ('Экономика', 'https://ria.ru/economy/', '!stonks.png'),
 }
 
 cache: dict[str, tuple[float, list[dict]]] = {}
@@ -31,6 +36,7 @@ last_msg: dict[int, int] = {}
 bot = Bot(token=BOT_TOKEN)
 
 
+# ---------- ЗАГРУЗКА НОВОСТЕЙ ----------
 async def fetch(url: str) -> str:
     timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as s:
@@ -44,7 +50,9 @@ async def get_news(tab: str) -> list[dict]:
     if tab in cache and time.time() - cache[tab][0] < 300:
         return cache[tab][1]
 
-
+    url = TABS[tab][1]
+    data = await fetch(url)
+    items = []
 
     if url.endswith('.xml'):
         for e in feedparser.parse(data).entries[:10]:
@@ -63,7 +71,53 @@ async def get_news(tab: str) -> list[dict]:
                 if len(items) == 10:
                     break
 
+    if items:
+        cache[tab] = (time.time(), items)
+    return items
 
+
+
+async def get_article(url: str) -> str:
+    """Вытаскивает текст самой статьи."""
+    try:
+        soup = BeautifulSoup(await fetch(url), 'html.parser')
+        ps = [p.get_text(" ", strip=True) for p in soup.select('div.article__text') if p.get_text(strip=True)]
+        if not ps:
+            ps = [p.get_text(" ", strip=True) for p in soup.select('article p') if len(p.get_text(strip=True)) > 40]
+        if ps:
+            return "\n\n".join(ps)
+    except Exception as e:
+        print(f"Ошибка статьи: {e}")
+    return "Не удалось загрузить текст статьи. Откройте оригинал по кнопке ниже."
+
+
+# ---------- АВТОПОСТИНГ В КАНАЛ ----------
+async def channel_poster():
+    """Каждые 3 минуты проверяет RSS и шлёт новые новости в канал."""
+    sent_links = set()
+    first_run = True
+
+    while True:
+        try:
+            feed = feedparser.parse(await fetch(RSS_URL))
+            for e in feed.entries:
+                title, link = e.get('title', '').strip(), e.get('link', '').strip()
+                if not title or not link or link in sent_links:
+                    continue
+
+                sent_links.add(link)
+                if first_run:
+                    continue
+
+                text = f'📰 <b>{html.escape(title)}</b>\n\n🔗 <a href="{link}">Читать на РИА</a>'
+                await bot.send_message(CHANNEL_ID, text, parse_mode='HTML')
+                await asyncio.sleep(1.5)
+
+            first_run = False
+        except Exception as e:
+            print(f"Ошибка автопостинга в канал: {e}")
+
+        await asyncio.sleep(180)  # пауза 3 минуты
 
 
 # ---------- ЭКРАНЫ И КНОПКИ ----------
@@ -84,7 +138,31 @@ async def send_screen(chat_id: int, text: str, kb: InlineKeyboardMarkup, img: st
         except Exception as e:
             print(f"Ошибка фото ({img}): {e}")
 
+    if not sent:
+        sent = await bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=kb)
+    last_msg[chat_id] = sent.message_id
 
+
+def kb_tabs():
+    btns = [InlineKeyboardButton(text=t[0], callback_data=f"tab_{k}") for k, t in TABS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=[btns[i:i + 2] for i in range(0, len(btns), 2)])
+
+
+def kb_news(tab: str, n: int):
+    btns = [InlineKeyboardButton(text=str(i + 1), callback_data=f"news_{tab}_{i}") for i in range(n)]
+    rows = [btns[i:i + 5] for i in range(0, n, 5)]
+    rows.append([InlineKeyboardButton(text="« К разделам", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_article(tab: str, link: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Открыть на сайте", url=link)],
+        [
+            InlineKeyboardButton(text="« К новостям", callback_data=f"tab_{tab}"),
+            InlineKeyboardButton(text="« К разделам", callback_data="menu"),
+        ],
+    ])
 
 
 
@@ -145,85 +223,7 @@ async def channel_poster():
         except Exception as e:
             print(f"Ошибка автопостинга в канал: {e}")
 
-        await asyncio.sleep(180)  # пауза 3 минуты
-
-
-# ---------- ЭКРАНЫ И КНОПКИ ----------
-async def send_screen(chat_id: int, text: str, kb: InlineKeyboardMarkup, img: str | None = None, del_id: int | None = None):
-    """Удаляет прошлое сообщение и шлёт новое (с фото или текстом)."""
-    for msg_id in {del_id, last_msg.get(chat_id)}:
-        if msg_id:
-            try:
-                await bot.delete_message(chat_id, msg_id)
-            except TelegramBadRequest:
-                pass
-
-    path = IMG_DIR / img if img else None
-    sent = None
-    if path and path.exists() and len(text) <= 1024:
-        try:
-            sent = await bot.send_photo(chat_id, FSInputFile(path), caption=text, parse_mode='HTML', reply_markup=kb)
-        except Exception as e:
-            print(f"Ошибка фото ({img}): {e}")
-
-
-def kb_tabs():
-    btns = [InlineKeyboardButton(text=t[0], callback_data=f"tab_{k}") for k, t in TABS.items()]
-    return InlineKeyboardMarkup(inline_keyboard=[btns[i:i + 2] for i in range(0, len(btns), 2)])
-
-
-def kb_news(tab: str, n: int):
-    btns = [InlineKeyboardButton(text=str(i + 1), callback_data=f"news_{tab}_{i}") for i in range(n)]
-    rows = [btns[i:i + 5] for i in range(0, n, 5)]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def kb_article(tab: str, link: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть на сайте", url=link)],
-    ])
-
-
-
-@dp.callback_query(F.data == "menu")
-async def cb_menu(call: CallbackQuery):
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("tab_"))
-async def cb_tab(call: CallbackQuery):
-    tab = call.data.removeprefix("tab_")
-    await call.answer("Загружаю...")
-
-    try:
-        items = await get_news(tab)
-    except Exception as e:
-        print(f"Ошибка раздела {tab}: {e}")
-        items = []
-
-    name, _, img = TABS[tab]
-    if not items:
-        await send_screen(call.message.chat.id, f"<b>{name}</b>\n\nНе удалось загрузить новости.", kb_tabs(), 'musia.png', call.message.message_id)
-        return
-
-    lines = [f"<b>{name} — последние новости</b>\nНажми на номер, чтобы прочитать:\n"]
-    for i, item in enumerate(items, 1):
-        title = item['title']
-        if len(title) > 65:
-            title = title[:64].rsplit(" ", 1)[0] + "…"
-        lines.append(f"<b>{i}.</b> {html.escape(title)}")
-
-    await send_screen(call.message.chat.id, "\n".join(lines), kb_news(tab, len(items)), img, call.message.message_id)
-
-
-@dp.callback_query(F.data.startswith("news_"))
-async def cb_news(call: CallbackQuery):
-    _, tab, idx = call.data.split("_")
-    item = cache[tab][1][int(idx)]
-
-    title = f"📰 <b>{html.escape(item['title'])}</b>\n\n"
-    body = html.escape(await get_article(item['link']))
-    if len(title) + len(body) > 4000:
-        body = body[:4000 - len(title)].rsplit(" ", 1)[0] + "…"
+        await asyncio.sleep(180)  
 
 
 
