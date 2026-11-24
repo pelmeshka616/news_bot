@@ -34,6 +34,7 @@ cache: dict[str, tuple[float, list[dict]]] = {}
 last_msg: dict[int, int] = {}
 
 bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 
 # ---------- ЗАГРУЗКА НОВОСТЕЙ ----------
@@ -173,7 +174,7 @@ async def cmd_start(msg: Message):
         await msg.delete()
     except TelegramBadRequest:
         pass
-    await send_screen(msg.chat.id, "<b>Новости РИА</b>\n\nВыбери раздел:", 'musia.png')
+    await send_screen(msg.chat.id, "<b>Новости РИА</b>\n\nВыбери раздел:", kb_tabs(), 'musia.png')
 
 @dp.message(Command("clear"))
 async def cmd_clear(msg: Message):
@@ -198,32 +199,63 @@ async def cmd_admin(msg: Message):
 
 
 
-async def channel_poster():
-    """Каждые 3 минуты проверяет RSS и шлёт новые новости в канал."""
-    sent_links = set()
-    first_run = True
-
-    while True:
-        try:
-            feed = feedparser.parse(await fetch(RSS_URL))
-            for e in feed.entries:
-                title, link = e.get('title', '').strip(), e.get('link', '').strip()
-                if not title or not link or link in sent_links:
-                    continue
-
-                sent_links.add(link)
-                if first_run:
-                    continue
-
-                text = f'📰 <b>{html.escape(title)}</b>\n\n🔗 <a href="{link}">Читать на РИА</a>'
-                await bot.send_message(CHANNEL_ID, text, parse_mode='HTML')
-                await asyncio.sleep(1.5)
-
-            first_run = False
-        except Exception as e:
-            print(f"Ошибка автопостинга в канал: {e}")
-
-        await asyncio.sleep(180)  
+@dp.callback_query(F.data == "menu")
+async def cb_menu(call: CallbackQuery):
+    await call.answer()
+    await send_screen(call.message.chat.id, "<b>Новости РИА</b>\n\nВыбери раздел:", kb_tabs(), 'musia.png', call.message.message_id)
 
 
+@dp.callback_query(F.data.startswith("tab_"))
+async def cb_tab(call: CallbackQuery):
+    tab = call.data.removeprefix("tab_")
+    await call.answer("Загружаю...")
+
+    try:
+        items = await get_news(tab)
+    except Exception as e:
+        print(f"Ошибка раздела {tab}: {e}")
+        items = []
+
+    name, _, img = TABS[tab]
+    if not items:
+        await send_screen(call.message.chat.id, f"<b>{name}</b>\n\nНе удалось загрузить новости.", kb_tabs(), 'musia.png', call.message.message_id)
+        return
+
+    lines = [f"<b>{name} — последние новости</b>\nНажми на номер, чтобы прочитать:\n"]
+    for i, item in enumerate(items, 1):
+        title = item['title']
+        if len(title) > 65:
+            title = title[:64].rsplit(" ", 1)[0] + "…"
+        lines.append(f"<b>{i}.</b> {html.escape(title)}")
+
+    await send_screen(call.message.chat.id, "\n".join(lines), kb_news(tab, len(items)), img, call.message.message_id)
+
+
+@dp.callback_query(F.data.startswith("news_"))
+async def cb_news(call: CallbackQuery):
+    _, tab, idx = call.data.split("_")
+    try:
+        item = cache[tab][1][int(idx)]
+    except (KeyError, IndexError):
+        await call.answer("Список устарел, обнови раздел.", show_alert=True)
+        return
+
+    await call.answer("Загружаю статью...")
+    title = f"📰 <b>{html.escape(item['title'])}</b>\n\n"
+    body = html.escape(await get_article(item['link']))
+    if len(title) + len(body) > 4000:
+        body = body[:4000 - len(title)].rsplit(" ", 1)[0] + "…"
+
+    await send_screen(call.message.chat.id, title + body, kb_article(tab, item['link']), None, call.message.message_id)
+
+
+# ---------- ЗАПУСК ----------
+async def main():
+    asyncio.create_task(channel_poster())
+    print("Бот запущен...")
+    await dp.start_polling(bot)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
 
