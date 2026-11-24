@@ -118,3 +118,67 @@ async def cmd_admin(msg: Message):
     ])
     await send_screen(msg.chat.id, "По всем вопросам пиши админу: @kapustik33", kb)
 
+
+
+async def channel_poster():
+    """Каждые 3 минуты проверяет RSS и шлёт новые новости в канал."""
+    sent_links = set()
+    first_run = True
+
+    while True:
+        try:
+            feed = feedparser.parse(await fetch(RSS_URL))
+            for e in feed.entries:
+                title, link = e.get('title', '').strip(), e.get('link', '').strip()
+                if not title or not link or link in sent_links:
+                    continue
+
+                sent_links.add(link)
+                if first_run:
+                    continue
+
+                text = f'📰 <b>{html.escape(title)}</b>\n\n🔗 <a href="{link}">Читать на РИА</a>'
+                await bot.send_message(CHANNEL_ID, text, parse_mode='HTML')
+                await asyncio.sleep(1.5)
+
+            first_run = False
+        except Exception as e:
+            print(f"Ошибка автопостинга в канал: {e}")
+
+        await asyncio.sleep(180)  # пауза 3 минуты
+
+
+# ---------- ЭКРАНЫ И КНОПКИ ----------
+async def send_screen(chat_id: int, text: str, kb: InlineKeyboardMarkup, img: str | None = None, del_id: int | None = None):
+    """Удаляет прошлое сообщение и шлёт новое (с фото или текстом)."""
+    for msg_id in {del_id, last_msg.get(chat_id)}:
+        if msg_id:
+            try:
+                await bot.delete_message(chat_id, msg_id)
+            except TelegramBadRequest:
+                pass
+
+    path = IMG_DIR / img if img else None
+    sent = None
+    if path and path.exists() and len(text) <= 1024:
+        try:
+            sent = await bot.send_photo(chat_id, FSInputFile(path), caption=text, parse_mode='HTML', reply_markup=kb)
+        except Exception as e:
+            print(f"Ошибка фото ({img}): {e}")
+
+
+def kb_tabs():
+    btns = [InlineKeyboardButton(text=t[0], callback_data=f"tab_{k}") for k, t in TABS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=[btns[i:i + 2] for i in range(0, len(btns), 2)])
+
+
+def kb_news(tab: str, n: int):
+    btns = [InlineKeyboardButton(text=str(i + 1), callback_data=f"news_{tab}_{i}") for i in range(n)]
+    rows = [btns[i:i + 5] for i in range(0, n, 5)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_article(tab: str, link: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Открыть на сайте", url=link)],
+    ])
