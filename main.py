@@ -182,3 +182,48 @@ def kb_article(tab: str, link: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Открыть на сайте", url=link)],
     ])
+
+
+
+@dp.callback_query(F.data == "menu")
+async def cb_menu(call: CallbackQuery):
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("tab_"))
+async def cb_tab(call: CallbackQuery):
+    tab = call.data.removeprefix("tab_")
+    await call.answer("Загружаю...")
+
+    try:
+        items = await get_news(tab)
+    except Exception as e:
+        print(f"Ошибка раздела {tab}: {e}")
+        items = []
+
+    name, _, img = TABS[tab]
+    if not items:
+        await send_screen(call.message.chat.id, f"<b>{name}</b>\n\nНе удалось загрузить новости.", kb_tabs(), 'musia.png', call.message.message_id)
+        return
+
+    lines = [f"<b>{name} — последние новости</b>\nНажми на номер, чтобы прочитать:\n"]
+    for i, item in enumerate(items, 1):
+        title = item['title']
+        if len(title) > 65:
+            title = title[:64].rsplit(" ", 1)[0] + "…"
+        lines.append(f"<b>{i}.</b> {html.escape(title)}")
+
+    await send_screen(call.message.chat.id, "\n".join(lines), kb_news(tab, len(items)), img, call.message.message_id)
+
+
+@dp.callback_query(F.data.startswith("news_"))
+async def cb_news(call: CallbackQuery):
+    _, tab, idx = call.data.split("_")
+    item = cache[tab][1][int(idx)]
+
+    title = f"📰 <b>{html.escape(item['title'])}</b>\n\n"
+    body = html.escape(await get_article(item['link']))
+    if len(title) + len(body) > 4000:
+        body = body[:4000 - len(title)].rsplit(" ", 1)[0] + "…"
+
+
+
