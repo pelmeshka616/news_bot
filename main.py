@@ -41,7 +41,7 @@ dp = Dispatcher()
 async def fetch(url: str) -> str:
     timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as s:
-        async with s.get(url) as r:
+        async with s.get(url, ssl=False) as r:
             r.raise_for_status()
             return await r.text()
 
